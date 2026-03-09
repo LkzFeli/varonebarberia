@@ -670,7 +670,7 @@ async function handleReservar() {
     return;
   }
   if (!whatsapp || !/^\+?[0-9]{8,15}$/.test(whatsapp.replace(/\s/g, ""))) {
-    mostrarAlerta(alertaForm, "warn", "⚠️", "Ingresá un WhatsApp válido. Ejemplo: +5491112345678");
+    mostrarAlerta(alertaForm, "warn", "⚠️", "Ingresá un número de WhatsApp válido.");
     document.getElementById("whatsapp").focus();
     return;
   }
@@ -685,135 +685,132 @@ async function handleReservar() {
   ocultarAlerta(alertaForm);
 
   try {
-    const body = {
-      action:          "reservar",
-      cliente,
-      whatsapp,
-      fechaHoraInicio: state.slotSeleccionado.inicio,
+    const payload = {
+      action:   "reservar",
+      fecha:    state.fecha,
+      hora:     state.slotSeleccionado.inicio,
+      cliente:  cliente,
+      whatsapp: whatsapp.replace(/\s/g, ""),
     };
 
-    const data = await fetchGAS(body, "POST");
+    const res = await fetchGAS(payload, "POST");
 
-    // ── ÉXITO ────────────────────────────────────────────
-    mostrarResumen({
-      nombre:   cliente,
-      whatsapp,
-      inicio:   state.slotSeleccionado.inicio,
-      id:       data.id,
-      waLink:   data.whatsappLink,
-    });
-
-    // Recargar slots para reflejar el nuevo ocupado
-    cargarSlots(state.fecha);
+    if (res.ok) {
+      mostrarResumen(res);
+    } else {
+      mostrarAlerta(alertaForm, "error", "❌", res.mensaje || "Error al reservar.");
+      // Recargar slots por si cambió disponibilidad
+      cargarSlots(state.fecha);
+    }
 
   } catch (err) {
-    // ── ERROR (incluye "turno ya tomado") ────────────────
-    mostrarAlerta(alertaForm, "error", "❌", err.message);
-
-    // Recargamos slots automáticamente para mostrar el estado real
-    await cargarSlots(state.fecha);
-    state.slotSeleccionado = null;
-    resetBtnReservar();
-
+    mostrarAlerta(alertaForm, "error", "❌", `Error de red: ${err.message}`);
   } finally {
     state.enviando = false;
-    btnReservar.disabled = false;
-    if (!state.slotSeleccionado) resetBtnReservar();
+    resetBtnReservar();
   }
 }
 
 // ── MOSTRAR RESUMEN ───────────────────────────────────────────
-function mostrarResumen({ nombre, whatsapp, inicio, id, waLink }) {
-  const fecha = new Date(inicio);
-  const fechaFmt = fecha.toLocaleDateString("es-AR", {
-    weekday: "long", day: "numeric", month: "long"
-  });
-  const horaFmt = fecha.toLocaleTimeString("es-AR", {
-    hour: "2-digit", minute: "2-digit"
-  });
+function mostrarResumen(res) {
+  document.getElementById("r-nombre").textContent = res.cliente || "—";
+  document.getElementById("r-wa").textContent     = res.whatsapp || "—";
+  document.getElementById("r-fecha").textContent  = res.fechaHora || "—";
+  document.getElementById("r-id").textContent     = res.id || "—";
 
-  document.getElementById("r-nombre").textContent = nombre;
-  document.getElementById("r-wa").textContent     = whatsapp;
-  document.getElementById("r-fecha").textContent  = `${fechaFmt} a las ${horaFmt}`;
-  document.getElementById("r-id").textContent     = id;
-  document.getElementById("btn-whatsapp").href    = waLink;
+  // Armar link de WhatsApp
+  if (state.config && state.config.whatsapp_negocio) {
+    const num = state.config.whatsapp_negocio.replace(/\D/g, "");
+    const msg = encodeURIComponent(
+      `Hola! Acabo de reservar un turno:\n` +
+      `📅 ${res.fechaHora}\n` +
+      `👤 ${res.cliente}\n` +
+      `🆔 ${res.id}\n` +
+      `¿Me lo confirman?`
+    );
+    document.getElementById("btn-whatsapp").href = `https://wa.me/${num}?text=${msg}`;
+  }
 
   resumenSection.style.display = "block";
   resumenSection.scrollIntoView({ behavior: "smooth" });
+
+  // Limpiar selección
+  state.slotSeleccionado = null;
+  cargarSlots(state.fecha);
 }
 
-// ── FETCH HACIA GAS ───────────────────────────────────────────
+// ── UTILIDADES: FETCH A GAS ───────────────────────────────────
 async function fetchGAS(params, method = "GET") {
   let url = GAS_URL;
-  let options = {};
+  const opts = { redirect: "follow" };
 
   if (method === "GET") {
-    const qs = Object.entries(params)
-      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
-      .join("&");
+    const qs = new URLSearchParams(params).toString();
     url += "?" + qs;
-    options = { method: "GET" };
   } else {
-    options = {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" }, // GAS requiere text/plain para evitar CORS preflight
-      body: JSON.stringify(params),
-      redirect: "follow",
-    };
+    opts.method = "POST";
+    opts.body = JSON.stringify(params);
+    opts.headers = { "Content-Type": "text/plain" };
   }
 
-  const resp = await fetch(url, options);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
-
-  const json = await resp.json();
-  if (!json.ok) throw new Error(json.error || "Error desconocido del servidor.");
-  return json.data;
+  const resp = await fetch(url, opts);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
 }
 
-// ── HELPERS UI ────────────────────────────────────────────────
-function mostrarSkeletons() {
-  slotsContainer.innerHTML = Array(8)
-    .fill(`<div class="skeleton"></div>`)
-    .join("");
-}
-
-function setLiveState(estado, texto) {
-  liveDot.className = "live-dot";
-  if (estado === "loading") liveDot.classList.add("loading");
-  if (estado === "error")   liveDot.classList.add("error");
-  liveText.textContent = texto;
-}
-
-function mostrarAlerta(el, tipo, icono, msg) {
-  el.innerHTML = `
-    <div class="alert alert-${tipo}">
-      <span class="alert-icon">${icono}</span>
-      <div>${msg}</div>
-    </div>`;
-  el.style.display = "block";
-}
-
-function ocultarAlerta(el) {
-  el.style.display = "none";
-  el.innerHTML = "";
+// ── UTILIDADES: FECHA ─────────────────────────────────────────
+function formatFechaLocal(d) {
+  const yyyy = d.getFullYear();
+  const mm   = String(d.getMonth() + 1).padStart(2, "0");
+  const dd   = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 function cambiarFecha(delta) {
-  const [y, m, d] = fechaPicker.value.split("-").map(Number);
-  const nueva     = new Date(y, m - 1, d + delta);
-  const hoy       = new Date();
+  const current = new Date(state.fecha + "T12:00:00");
+  current.setDate(current.getDate() + delta);
+
+  const hoy = new Date();
   hoy.setHours(0, 0, 0, 0);
-  if (nueva < hoy) return; // No ir al pasado
-  fechaPicker.value = formatFechaLocal(nueva);
-  fechaPicker.dispatchEvent(new Event("change"));
+
+  if (current < hoy) return; // no ir al pasado
+
+  const nueva = formatFechaLocal(current);
+  fechaPicker.value = nueva;
+  state.fecha = nueva;
+  state.slotSeleccionado = null;
+  resetBtnReservar();
+  cargarSlots(nueva);
 }
 
-function formatFechaLocal(date) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
+// ── UTILIDADES: ALERTAS ───────────────────────────────────────
+function mostrarAlerta(el, tipo, icono, texto) {
+  el.className = `alert alert-${tipo}`;
+  el.innerHTML = `<span class="alert-icon">${icono}</span><div>${texto}</div>`;
+  el.style.display = "flex";
+}
+function ocultarAlerta(el) {
+  el.style.display = "none";
+}
+
+// ── UTILIDADES: LIVE INDICATOR ────────────────────────────────
+function setLiveState(status, text) {
+  liveDot.className = "live-dot";
+  if (status === "loading") liveDot.classList.add("loading");
+  if (status === "error")   liveDot.classList.add("error");
+  liveText.textContent = text;
+}
+
+// ── UTILIDADES: SKELETONS ─────────────────────────────────────
+function mostrarSkeletons() {
+  slotsContainer.innerHTML = "";
+  for (let i = 0; i < 6; i++) {
+    const sk = document.createElement("div");
+    sk.className = "skeleton";
+    slotsContainer.appendChild(sk);
+  }
 }
 </script>
+
 </body>
 </html>
